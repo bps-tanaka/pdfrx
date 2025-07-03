@@ -37,6 +37,14 @@ extension type _PdfiumWasmCommunicator(JSObject _) implements JSObject {
 @JS('PdfiumWasmCommunicator')
 external _PdfiumWasmCommunicator get _pdfiumWasmCommunicator;
 
+@JS('Atomics')
+extension type JSAtomics._(JSObject _) {
+  external void notify(JSObject typedArray, int index, [int count]);
+}
+
+@JS()
+external JSAtomics get Atomics; // ignore: non_constant_identifier_names
+
 /// A handle to a registered callback that can be unregistered
 class PdfiumWasmCallback {
   PdfiumWasmCallback.register(JSFunction callback)
@@ -173,7 +181,44 @@ class _PdfDocumentFactoryWasmImpl extends PdfDocumentFactory {
     int? maxSizeToCacheOnMemory,
     void Function()? onDispose,
   }) async {
-    throw UnimplementedError('PdfDocumentFactoryWasmImpl.openCustom is not implemented.');
+    await _init();
+
+    final jsCallback =
+        (JSUint8Array sharedDataView, JSNumber position, JSNumber size, JSInt32Array resultView) {
+          final dartBuffer = sharedDataView.toDart;
+          final pos = position.toDartInt;
+          final sz = size.toDartInt;
+          Future.value(read(dartBuffer, pos, sz))
+              .then((bytesRead) {
+                resultView.toDart[0] = bytesRead;
+              })
+              .catchError((Object e, StackTrace s) {
+                resultView.toDart[0] = -1;
+              })
+              .whenComplete(() {
+                Atomics.notify(resultView, 0);
+              });
+        }.toJS;
+
+    final callback = PdfiumWasmCallback.register(jsCallback);
+    customOnDispose() => callback.unregister();
+
+    return _openByFunc(
+      (password) => sendCommand(
+        'loadDocumentFromCustom',
+        parameters: {
+          'fileSize': fileSize,
+          'readCallbackId': callback.id,
+          'password': password,
+          'useProgressiveLoading': useProgressiveLoading,
+        },
+      ),
+      sourceName: sourceName,
+      factory: this,
+      passwordProvider: passwordProvider,
+      firstAttemptByEmptyPassword: firstAttemptByEmptyPassword,
+      onDispose: customOnDispose,
+    );
   }
 
   @override
