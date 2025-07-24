@@ -606,6 +606,71 @@ function loadDocumentFromData(params) {
   return _loadDocument(docHandle, useProgressiveLoading, () => fileSystem.unregisterFile(tempFileName));
 }
 
+/**
+ * Check if SharedArrayBuffer is available
+ */
+const canUseSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+
+/** 
+ * @param {{
+ * fileSize: number,
+ * readCallbackId: number,
+ * password: string|undefined,
+ * useProgressiveLoading: boolean|undefined
+ * }} params
+ */
+function loadDocumentFromCustom(params) {
+  if (!canUseSharedArrayBuffer) {
+    throw new Error('SharedArrayBuffer is not supported, which is required for openCustom on Web.');
+  }
+
+  const { fileSize, readCallbackId, password, useProgressiveLoading } = params;
+
+  const tempFileName = '/tmp/custom_' + Date.now() + '.pdf';
+  fileSystem.registerFile(tempFileName, {
+    size: fileSize,
+    read: function (context, buffer) {
+      const position = context.position;
+      const size = buffer.length;
+      const bytesRead = readFromDart(readCallbackId, position, size, buffer);
+      if (bytesRead > 0) {
+        context.position += bytesRead;
+      }
+      return bytesRead;
+    },
+    close: function () { }
+  });
+  
+  const fileNamePtr = StringUtils.allocateUTF8(tempFileName);
+  const passwordPtr = StringUtils.allocateUTF8(password || '');
+  const docHandle = Pdfium.wasmExports.FPDF_LoadDocument(fileNamePtr, passwordPtr);
+  StringUtils.freeUTF8(passwordPtr);
+  StringUtils.freeUTF8(fileNamePtr);
+  
+  return _loadDocument(docHandle, useProgressiveLoading, () => {
+    fileSystem.unregisterFile(tempFileName);
+  });
+}
+
+function readFromDart(callbackId, position, size, wasmBuffer) {
+  const sharedDataBuffer = new SharedArrayBuffer(size);
+  const sharedDataView = new Uint8Array(sharedDataBuffer);
+  
+  const resultBuffer = new SharedArrayBuffer(4); 
+  const resultView = new Int32Array(resultBuffer);
+  Atomics.store(resultView, 0, -1); // 処理中
+
+  invokeCallback(callbackId, sharedDataView, position, size, resultView);
+
+  Atomics.wait(resultView, 0, -1, 30000); 
+
+  const bytesRead = Atomics.load(resultView, 0);
+  if (bytesRead > 0) {
+    wasmBuffer.set(sharedDataView.subarray(0, bytesRead));
+  }
+  return bytesRead;
+}
+
 /** @type {Object<number, function():void>} */
 const disposers = {};
 
@@ -1151,6 +1216,7 @@ function _pdfDestFromDest(dest, docHandle) {
 const functions = {
   loadDocumentFromUrl,
   loadDocumentFromData,
+  loadDocumentFromCustom,
   loadPagesProgressively,
   closeDocument,
   loadOutline,
